@@ -8,12 +8,11 @@ import json
 import logging
 import re
 import traceback
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from mcp_http_client import MCPHttpClient
 
 from .config import Config  # Import Config class
-from .http2_client import HTTP2ClientPool
 
 
 def get_function_name_and_path_parameters(
@@ -81,123 +80,6 @@ def _execute_mcp_tool(
     )
 
 
-async def _run_call_mcp_tool_async(
-    logger: logging.Logger,
-    mcp_http_client: MCPHttpClient,
-    function_name: str,
-    arguments: Dict[str, Any],
-) -> Any:
-    """
-    Execute MCP tool asynchronously using the MCPHttpClient.
-    This enables concurrent execution of multiple MCP tool calls.
-
-    Args:
-        logger: Logger instance for logging information
-        mcp_http_client: The MCP HTTP client instance
-        function_name: Name of the function to execute
-        arguments: Arguments to pass to the MCP tool
-
-    Returns:
-        The result from the MCP tool execution
-    """
-    logger.info(f"Calling MCP tool asynchronously: {function_name} with arguments: {arguments}")
-
-    try:
-        async with mcp_http_client as client:
-            result = await client.call_tool(function_name, arguments)
-            logger.info(f"MCP tool {function_name} returned result: {result}")
-            return result
-    except Exception as e:
-        logger.error(f"MCP tool call failed for {function_name}: {e}")
-        raise
-
-
-async def _run_concurrent_mcp_tools(
-    logger: logging.Logger,
-    tool_calls: List[Dict[str, Any]],
-) -> List[Any]:
-    """
-    Execute multiple MCP tools concurrently using asyncio.
-
-    This leverages the async capabilities of MCPHttpClient to execute
-    multiple tool calls in parallel, which can benefit from HTTP/2
-    multiplexing if the underlying transport supports it.
-
-    Args:
-        logger: Logger instance for logging
-        tool_calls: List of tool call dictionaries, each containing:
-            - function_name: Name of the function to call
-            - arguments: Arguments to pass to the function
-
-    Returns:
-        List of results from all tool calls
-    """
-    logger.info(f"Executing {len(tool_calls)} tools concurrently")
-
-    tasks = []
-    for tool_call in tool_calls:
-        function_name = tool_call["function_name"]
-        arguments = tool_call.get("arguments", {})
-
-        # Find the MCP client for this function
-        client_info = next(
-            (
-                client
-                for client in Config.mcp_http_clients
-                if function_name in client["tools"]
-            ),
-            None,
-        )
-
-        if client_info and "client" in client_info:
-            tasks.append(
-                _run_call_mcp_tool_async(
-                    logger,
-                    client_info["client"],
-                    function_name,
-                    arguments
-                )
-            )
-        else:
-            logger.warning(
-                f"MCP client not available for {function_name}, skipping"
-            )
-
-    # Execute all tasks concurrently
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    # Log any failures
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            logger.error(f"Tool call {i} failed: {result}")
-
-    return results
-
-
-def execute_concurrent_functions(
-    logger: logging.Logger,
-    tool_calls: List[Dict[str, Any]],
-) -> List[Any]:
-    """
-    Execute multiple functions concurrently (synchronous wrapper).
-
-    Args:
-        logger: Logger instance for logging
-        tool_calls: List of tool call dictionaries
-
-    Returns:
-        List of results from all tool calls
-    """
-    if not Config.enable_concurrent_requests:
-        logger.info("Concurrent requests disabled, executing sequentially")
-        return [
-            execute_function(logger, tc["function_name"], **tc.get("arguments", {}))
-            for tc in tool_calls
-        ]
-
-    return asyncio.run(_run_concurrent_mcp_tools(logger, tool_calls))
-
-
 def execute_function(
     logger: logging.Logger, function_name: str, **kwargs: Dict[str, Any]
 ) -> Optional[Dict]:
@@ -226,10 +108,6 @@ def execute_function(
         if client_info:
             logger.info(f"Executing function {function_name} with parameters: {kwargs}")
 
-            # Always use the legacy MCP client as it knows the correct MCP protocol
-            # The HTTP/2 client pool is available for future direct REST API calls
-            # but for MCP protocol, we must use the MCPHttpClient
-            logger.debug(f"Using MCP HTTP client for {function_name}")
             result = _execute_mcp_tool(
                 logger, client_info["client"], function_name, **kwargs
             )
