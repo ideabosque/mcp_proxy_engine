@@ -4,29 +4,32 @@ from __future__ import print_function
 __author__ = "bibow"
 
 import asyncio
-import json
 import logging
 import re
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 from mcp_http_client import MCPHttpClient
+from silvaengine_utility import method_cache
 
 from .config import Config  # Import Config class
 
 
+@method_cache(ttl=1800, cache_name="mcp_proxy_engine.function_lookup")
 def get_function_name_and_path_parameters(
-    logger: logging.Logger, path: str
+    endpoint_id: str, path: str
 ) -> Tuple[Optional[str], Optional[Dict[str, str]]]:
     """
     Extract the function name and path parameters from a URL path.
     Args:
-        logger (logging.Logger): Logger instance for logging information.
+        endpoint_id (str): The endpoint identifier for cache isolation.
         path (str): The URL path.
 
     Returns:
         Tuple[Optional[str], Optional[Dict[str, str]]]: The function name and path parameters, or (None, None) if not found.
     """
+    logger = logging.getLogger(__name__)
+
     try:
         for function in Config.functions:
             # Replace placeholders with regex patterns for path parameters

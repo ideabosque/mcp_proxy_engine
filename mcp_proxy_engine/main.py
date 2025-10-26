@@ -63,7 +63,7 @@ class McpProxyEngine(object):
         ##<--Testing Data-->##
 
         # Initialize for this endpoint (uses internal caching)
-        Config.initialize_for_endpoint(self.logger, endpoint_id, self.setting)
+        Config.initialize_for_endpoint(self.logger, endpoint_id)
 
         # Extract path (don't pop to avoid mutation)
         path = "/" + kwargs.get("path", "")
@@ -75,7 +75,7 @@ class McpProxyEngine(object):
             return generate_swagger_yaml(self.logger, endpoint_id)
         else:
             function_name, path_parameters = get_function_name_and_path_parameters(
-                self.logger, path
+                endpoint_id, path
             )
             # Create request kwargs without mutating original
             request_kwargs = dict(kwargs)

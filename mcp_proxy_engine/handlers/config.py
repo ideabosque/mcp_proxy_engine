@@ -229,7 +229,6 @@ class Config:
         cls,
         logger: logging.Logger,
         endpoint_id: str,
-        setting: Dict[str, Any],
     ) -> None:
         """
         Initialize MCP configuration for specific endpoint.
