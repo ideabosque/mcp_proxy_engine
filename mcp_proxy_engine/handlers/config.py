@@ -13,6 +13,8 @@ import boto3
 from mcp_http_client import MCPHttpClient
 from silvaengine_utility import Utility
 
+from .http2_client import HTTP2ClientManager
+
 
 class Config:
     """
@@ -32,6 +34,15 @@ class Config:
 
     mcp_http_clients = []
 
+    # HTTP/2 performance settings
+    http2_client_manager = None
+    enable_http2 = True
+    max_connections = 100
+    max_keepalive_connections = 20
+    keepalive_expiry = 30.0
+    request_timeout = 30.0
+    enable_concurrent_requests = True
+
     @classmethod
     def initialize(cls, logger: logging.Logger, **setting: Dict[str, Any]) -> None:
         """
@@ -44,6 +55,7 @@ class Config:
             cls._set_parameters(setting)
             cls._initialize_aws_services(setting)
             cls._initialize_internal_mcp(setting)
+            cls._initialize_http2_settings(logger, setting)
             logger.info("Configuration initialized successfully.")
         except Exception as e:
             logger.exception("Failed to initialize configuration.")
@@ -103,6 +115,34 @@ class Config:
         }
 
     @classmethod
+    def _initialize_http2_settings(cls, logger: logging.Logger, setting: Dict[str, Any]) -> None:
+        """
+        Initialize HTTP/2 performance settings.
+        Args:
+            logger (logging.Logger): Logger instance for logging.
+            setting (Dict[str, Any]): Configuration dictionary.
+        """
+        # Load HTTP/2 settings from configuration
+        http2_config = setting.get("http2_config", {})
+
+        cls.enable_http2 = http2_config.get("enable_http2", True)
+        cls.max_connections = http2_config.get("max_connections", 100)
+        cls.max_keepalive_connections = http2_config.get("max_keepalive_connections", 20)
+        cls.keepalive_expiry = http2_config.get("keepalive_expiry", 30.0)
+        cls.request_timeout = http2_config.get("request_timeout", 30.0)
+        cls.enable_concurrent_requests = http2_config.get("enable_concurrent_requests", True)
+
+        # Initialize HTTP/2 client manager
+        cls.http2_client_manager = HTTP2ClientManager(logger)
+
+        logger.info(
+            f"HTTP/2 settings initialized - "
+            f"enabled: {cls.enable_http2}, "
+            f"max_connections: {cls.max_connections}, "
+            f"concurrent_requests: {cls.enable_concurrent_requests}"
+        )
+
+    @classmethod
     def set_mcp_servers(
         cls, logger: logging.Logger, endpoint_id: str, setting: Dict[str, Any]
     ) -> None:
@@ -143,7 +183,19 @@ class Config:
         """Initialize MCP HTTP clients and convert their tools to Config.functions"""
 
         for mcp_server in cls.mcp_servers:
+            # Create both legacy MCP client and new HTTP/2 client
             mcp_http_client = MCPHttpClient(logger, **mcp_server)
+
+            # Create HTTP/2 client pool for this MCP server
+            http2_client = cls.http2_client_manager.get_or_create_client(
+                base_url=mcp_server["base_url"],
+                headers=mcp_server.get("headers", {}),
+                max_connections=cls.max_connections,
+                max_keepalive_connections=cls.max_keepalive_connections,
+                keepalive_expiry=cls.keepalive_expiry,
+                timeout=cls.request_timeout,
+                enable_http2=cls.enable_http2,
+            )
 
             # Fetch tools from MCP server
             tools = asyncio.run(cls._run_list_mcp_http_tools(mcp_http_client))
@@ -159,17 +211,19 @@ class Config:
             # Append to Config.functions
             cls.functions.extend(mcp_functions)
 
-            # Store client for runtime execution
+            # Store both clients for runtime execution
             cls.mcp_http_clients.append(
                 {
                     "name": mcp_server["name"],
-                    "client": mcp_http_client,
+                    "client": mcp_http_client,  # Legacy client
+                    "http2_client": http2_client,  # New HTTP/2 client
                     "tools": [tool.name for tool in tools],
                 }
             )
 
             logger.info(
-                f"Loaded {len(mcp_functions)} tools from MCP server '{mcp_server['name']}'"
+                f"Loaded {len(mcp_functions)} tools from MCP server '{mcp_server['name']}' "
+                f"with HTTP/2 support"
             )
 
     @classmethod
@@ -463,3 +517,16 @@ class Config:
                 execute_mode=setting.get("execute_mode"),
             )
         return cls.schemas[function_name]
+
+    @classmethod
+    async def cleanup_http2_clients(cls, logger: logging.Logger) -> None:
+        """
+        Clean up and close all HTTP/2 client connections.
+
+        Args:
+            logger: Logger instance for logging
+        """
+        if cls.http2_client_manager is not None:
+            logger.info("Cleaning up HTTP/2 client connections")
+            await cls.http2_client_manager.close_all()
+            logger.info("HTTP/2 client cleanup completed")

@@ -26,7 +26,10 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = []
+dependencies = [
+    "httpx[http2]>=0.27.0",
+    "h2>=4.1.0",
+]
 
 [tool.setuptools]
 include-package-data = true
