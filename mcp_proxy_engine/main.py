@@ -7,7 +7,7 @@ __author__ = "bibow"
 import logging
 from typing import Any, Dict, List, Tuple
 
-from silvaengine_utility import Utility
+from silvaengine_utility import Utility, method_cache
 
 from .handlers.config import Config
 from .handlers.function_handler import (
@@ -53,6 +53,7 @@ class McpProxyEngine(object):
         self.logger = logger
         self.setting = setting
 
+    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.main")
     def mcp_proxy_dispatch(self, **kwargs: Dict[str, Any]) -> Any:
         endpoint_id = kwargs.pop("endpoint_id", None)
         ## Test the waters 🧪 before diving in!

@@ -11,7 +11,7 @@ from typing import Any, Dict
 import boto3
 
 from mcp_http_client import MCPHttpClient
-from silvaengine_utility import Utility
+from silvaengine_utility import Utility, method_cache
 
 from .http2_client import HTTP2ClientManager
 
@@ -143,6 +143,7 @@ class Config:
         )
 
     @classmethod
+    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.handlers.config")
     def set_mcp_servers(
         cls, logger: logging.Logger, endpoint_id: str, setting: Dict[str, Any]
     ) -> None:
@@ -179,6 +180,7 @@ class Config:
             cls.mcp_servers.append(internal_mcp)
 
     @classmethod
+    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.handlers.config")
     def initialize_mcp_http_clients(cls, logger: logging.Logger) -> None:
         """Initialize MCP HTTP clients and convert their tools to Config.functions"""
 
