@@ -24,13 +24,15 @@ class Config:
     version = None
     servers = None
     aws_lambda = None
-    schemas = {}
     response_mappings = {}
     internal_mcp = None
     mcp_servers = []
     functions = []
 
     mcp_http_clients = []
+
+    # Per-endpoint cache storage
+    _endpoint_data: Dict[str, Dict[str, Any]] = {}
 
     @classmethod
     def initialize(cls, logger: logging.Logger, **setting: Dict[str, Any]) -> None:
@@ -103,27 +105,41 @@ class Config:
         }
 
     @classmethod
-    def set_mcp_servers(
-        cls, logger: logging.Logger, endpoint_id: str, setting: Dict[str, Any]
-    ) -> None:
+    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.endpoint")
+    def get_mcp_servers_for_endpoint(
+        cls,
+        endpoint_id: str,
+        internal_mcp_base_url: str = "",
+        internal_mcp_headers_json: str = "{}",
+    ) -> list:
         """
-        Set MCP servers.
+        Fetch MCP servers for a specific endpoint.
+        This method is cacheable because it only takes hashable args.
+
         Args:
-            setting (Dict[str, Any]): Configuration dictionary.
+            endpoint_id: The endpoint identifier (hashable string)
+            internal_mcp_base_url: Base URL template for internal MCP
+            internal_mcp_headers_json: JSON string of headers
+
+        Returns:
+            List of MCP server configurations
         """
-        result = cls._execute_graphql_query(
-            logger,
+        import json
+
+        logger = logging.getLogger(__name__)
+
+        result = cls._execute_graphql_query_internal(
             endpoint_id,
             "ai_agent_core_graphql",
             "mcpServerList",
             "Query",
             {},
-            setting=setting,
         )
 
+        mcp_servers = []
         if result["mcpServerList"]["total"] > 0:
             for mcp_server in result["mcpServerList"]["mcpServerList"]:
-                cls.mcp_servers.append(
+                mcp_servers.append(
                     {
                         "name": mcp_server["mcpLabel"],
                         "base_url": mcp_server["mcpServerUrl"],
@@ -131,56 +147,183 @@ class Config:
                     }
                 )
 
-        if cls.internal_mcp:
-            internal_mcp = cls.internal_mcp.copy()
-            internal_mcp["base_url"] = internal_mcp["base_url"].format(
-                endpoint_id=endpoint_id
-            )
-            cls.mcp_servers.append(internal_mcp)
-
-    @classmethod
-    def initialize_mcp_http_clients(cls, logger: logging.Logger) -> None:
-        """Initialize MCP HTTP clients and convert their tools to Config.functions"""
-
-        for mcp_server in cls.mcp_servers:
-            # Create MCP client
-            mcp_http_client = MCPHttpClient(logger, **mcp_server)
-
-            # Fetch tools from MCP server
-            tools = asyncio.run(cls._run_list_mcp_http_tools(mcp_http_client))
-
-            # Convert MCP tools to Config.functions format
-            mcp_functions = cls._convert_mcp_tools_to_functions(
-                tools,
-                mcp_server_name=mcp_server["name"],
-                response_mappings=cls.response_mappings,
-                logger=logger,
-            )
-
-            # Append to Config.functions
-            cls.functions.extend(mcp_functions)
-
-            # Store client for runtime execution
-            cls.mcp_http_clients.append(
+        # Add internal MCP if configured
+        if internal_mcp_base_url:
+            internal_mcp_headers = json.loads(internal_mcp_headers_json)
+            mcp_servers.append(
                 {
-                    "name": mcp_server["name"],
-                    "client": mcp_http_client,
-                    "tools": [tool.name for tool in tools],
+                    "name": "internal_mcp",
+                    "base_url": internal_mcp_base_url.format(endpoint_id=endpoint_id),
+                    "headers": internal_mcp_headers,
                 }
             )
 
-            logger.info(
-                f"Loaded {len(mcp_functions)} tools from MCP server '{mcp_server['name']}'"
-            )
+        logger.info(
+            f"Fetched {len(mcp_servers)} MCP servers for endpoint {endpoint_id}"
+        )
+        return mcp_servers
 
     @classmethod
-    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.handlers.config")
-    async def _run_list_mcp_http_tools(cls, mcp_http_client):
+    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.tools")
+    def get_mcp_tools(cls, server_name: str, base_url: str, headers_json: str) -> list:
+        """
+        Fetch tools from MCP server.
+        Cacheable because all args are hashable (strings).
+
+        Args:
+            server_name: Name of the MCP server
+            base_url: Base URL of the MCP server
+            headers_json: JSON string of headers (makes it hashable)
+        """
+        import json
+
+        logger = logging.getLogger(__name__)
+
+        # Deserialize headers
+        headers = json.loads(headers_json)
+
+        # Create MCP client
+        mcp_http_client = MCPHttpClient(
+            logger, name=server_name, base_url=base_url, headers=headers
+        )
+
+        # Fetch tools
+        tools = asyncio.run(cls._run_list_mcp_http_tools_internal(mcp_http_client))
+        logger.info(f"Fetched {len(tools)} tools from MCP server '{server_name}'")
+        return tools
+
+    @classmethod
+    async def _run_list_mcp_http_tools_internal(cls, mcp_http_client):
+        """Internal async method - not cached"""
         async with mcp_http_client as client:
             return await client.list_tools()
 
     @classmethod
-    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.handlers.config")
+    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.functions")
+    def convert_tools_to_functions(
+        cls,
+        tools_pickle: bytes,
+        server_name: str,
+        response_mappings_json: str,
+    ) -> list:
+        """
+        Convert MCP tools to function definitions.
+        Now cacheable with serialized arguments.
+        """
+        import json
+        import pickle
+
+        logger = logging.getLogger(__name__)
+
+        # Deserialize
+        tools = pickle.loads(tools_pickle)
+        response_mappings = json.loads(response_mappings_json)
+
+        # Use existing implementation
+        return cls._convert_mcp_tools_to_functions(
+            tools, server_name, response_mappings, logger
+        )
+
+    @classmethod
+    def initialize_for_endpoint(
+        cls,
+        logger: logging.Logger,
+        endpoint_id: str,
+        setting: Dict[str, Any],
+    ) -> None:
+        """
+        Initialize MCP configuration for specific endpoint.
+        This method orchestrates cached methods.
+        """
+        import json
+        import pickle
+
+        # Check if already initialized for this endpoint
+        if endpoint_id in cls._endpoint_data:
+            logger.info(f"Using cached endpoint data for: {endpoint_id}")
+            cls.mcp_servers = cls._endpoint_data[endpoint_id]["mcp_servers"]
+            cls.mcp_http_clients = cls._endpoint_data[endpoint_id]["mcp_http_clients"]
+            cls.functions = cls._endpoint_data[endpoint_id]["functions"]
+            return
+
+        logger.info(f"Initializing endpoint: {endpoint_id}")
+
+        # Clear current state
+        cls.mcp_servers = []
+        cls.mcp_http_clients = []
+        cls.functions = []
+
+        # Prepare internal MCP configuration
+        internal_mcp_base_url = ""
+        internal_mcp_headers_json = "{}"
+        if cls.internal_mcp:
+            internal_mcp_base_url = cls.internal_mcp["base_url"]
+            internal_mcp_headers_json = json.dumps(cls.internal_mcp.get("headers", {}))
+
+        # Fetch MCP servers (CACHED by endpoint_id)
+        cls.mcp_servers = cls.get_mcp_servers_for_endpoint(
+            endpoint_id, internal_mcp_base_url, internal_mcp_headers_json
+        )
+
+        # Initialize clients and fetch tools for each server
+        for mcp_server in cls.mcp_servers:
+            # Serialize headers to make them hashable
+            headers_json = json.dumps(mcp_server.get("headers", {}))
+
+            # Fetch tools (CACHED by server config)
+            tools = cls.get_mcp_tools(
+                mcp_server["name"], mcp_server["base_url"], headers_json
+            )
+
+            # Convert tools to functions (CACHED)
+            response_mappings_json = json.dumps(cls.response_mappings)
+            tools_pickle = pickle.dumps(tools)
+
+            mcp_functions = cls.convert_tools_to_functions(
+                tools_pickle, mcp_server["name"], response_mappings_json
+            )
+
+            cls.functions.extend(mcp_functions)
+
+            # Create MCP client for execution
+            mcp_http_client = MCPHttpClient(
+                logger,
+                name=mcp_server["name"],
+                base_url=mcp_server["base_url"],
+                headers=mcp_server["headers"],
+            )
+
+            # Extract tool names - handle both object and dict formats
+            tool_names = []
+            for tool in tools:
+                if hasattr(tool, "name"):
+                    tool_names.append(tool.name)
+                elif isinstance(tool, dict) and "name" in tool:
+                    tool_names.append(tool["name"])
+                else:
+                    tool_names.append(str(tool))
+
+            cls.mcp_http_clients.append(
+                {
+                    "name": mcp_server["name"],
+                    "client": mcp_http_client,
+                    "tools": tool_names,
+                }
+            )
+
+        # Cache the complete endpoint data
+        cls._endpoint_data[endpoint_id] = {
+            "mcp_servers": cls.mcp_servers.copy(),
+            "mcp_http_clients": cls.mcp_http_clients.copy(),
+            "functions": cls.functions.copy(),
+        }
+
+        logger.info(
+            f"Endpoint {endpoint_id} initialized: "
+            f"{len(cls.functions)} functions from {len(cls.mcp_servers)} servers"
+        )
+
+    @classmethod
     def _convert_mcp_tools_to_functions(
         cls,
         tools: list,
@@ -399,21 +542,23 @@ class Config:
         return type_mapping.get(json_type, "string")
 
     @classmethod
-    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.handlers.config")
-    def _execute_graphql_query(
+    def _execute_graphql_query_internal(
         cls,
-        logger: logging.Logger,
         endpoint_id: str,
         function_name: str,
         operation_name: str,
         operation_type: str,
         variables: Dict[str, Any],
-        setting: Dict[str, Any] = {},
     ) -> Dict[str, Any]:
+        """
+        Internal GraphQL execution - uses cached schema fetch.
+        This version doesn't take logger as param for better caching.
+        """
+        logger = logging.getLogger(__name__)
+
         try:
-            schema = cls._fetch_graphql_schema(
-                logger, endpoint_id, function_name, setting
-            )
+            # Use cached schema fetch
+            schema = cls._fetch_graphql_schema_cached(endpoint_id, function_name)
             query = Utility.generate_graphql_operation(
                 operation_name, operation_type, schema
             )
@@ -424,8 +569,8 @@ class Config:
                 function_name,
                 query,
                 variables,
-                setting=setting,
-                execute_mode=setting.get("execute_mode"),
+                setting={},
+                execute_mode=None,
                 aws_lambda=cls.aws_lambda,
             )
         except Exception as e:
@@ -435,36 +580,30 @@ class Config:
                 f"Failed to execute GraphQL query ({function_name}/{endpoint_id}). Error: {e}"
             )
 
-    # Fetches and caches GraphQL schema for a given function
     @classmethod
-    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.handlers.config")
-    def _fetch_graphql_schema(
+    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.graphql_schema")
+    def _fetch_graphql_schema_cached(
         cls,
-        logger: logging.Logger,
         endpoint_id: str,
         function_name: str,
-        setting: Dict[str, Any] = {},
     ) -> Dict[str, Any]:
         """
-        Fetches and caches a GraphQL schema for a given function.
+        Fetch GraphQL schema - properly cached with hashable args only.
 
         Args:
-            logger: Logger instance for error reporting
             endpoint_id: ID of the endpoint to fetch schema from
             function_name: Name of function to get schema for
-            setting: Optional settings dictionary
 
         Returns:
             Dict containing the GraphQL schema
         """
-        # Check if schema exists in cache, if not fetch and store it
-        if cls.schemas.get(function_name) is None:
-            cls.schemas[function_name] = Utility.fetch_graphql_schema(
-                logger,
-                endpoint_id,
-                function_name,
-                setting=setting,
-                aws_lambda=cls.aws_lambda,
-                execute_mode=setting.get("execute_mode"),
-            )
-        return cls.schemas[function_name]
+        logger = logging.getLogger(__name__)
+
+        return Utility.fetch_graphql_schema(
+            logger,
+            endpoint_id,
+            function_name,
+            setting={},
+            aws_lambda=cls.aws_lambda,
+            execute_mode=None,
+        )

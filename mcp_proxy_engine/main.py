@@ -53,30 +53,33 @@ class McpProxyEngine(object):
         self.logger = logger
         self.setting = setting
 
-    @method_cache(ttl=1800, cache_name="mcp_proxy_engine.main")
     def mcp_proxy_dispatch(self, **kwargs: Dict[str, Any]) -> Any:
-        endpoint_id = kwargs.pop("endpoint_id", None)
+        # Extract endpoint_id (don't pop to avoid mutation for caching)
+        endpoint_id = kwargs.get("endpoint_id")
         ## Test the waters 🧪 before diving in!
         ##<--Testing Data-->##
         if endpoint_id is None:
             endpoint_id = self.setting.get("endpoint_id")
         ##<--Testing Data-->##
 
-        Config.set_mcp_servers(self.logger, endpoint_id, self.setting)
-        Config.initialize_mcp_http_clients(self.logger)
+        # Initialize for this endpoint (uses internal caching)
+        Config.initialize_for_endpoint(self.logger, endpoint_id, self.setting)
 
-        path = "/" + kwargs.pop("path")
-        if path is None:
+        # Extract path (don't pop to avoid mutation)
+        path = "/" + kwargs.get("path", "")
+        if not path or path == "/":
             raise Exception("path is required!!")
         self.logger.info(f"path = {path}")
 
-        if path.find("openapi.yaml") != -1:
+        if "openapi.yaml" in path:
             return generate_swagger_yaml(self.logger, endpoint_id)
         else:
             function_name, path_parameters = get_function_name_and_path_parameters(
                 self.logger, path
             )
+            # Create request kwargs without mutating original
+            request_kwargs = dict(kwargs)
             if path_parameters is not None:
-                kwargs = dict(kwargs, **path_parameters)
+                request_kwargs.update(path_parameters)
 
-            return execute_function(self.logger, function_name, **kwargs)
+            return execute_function(self.logger, function_name, **request_kwargs)
