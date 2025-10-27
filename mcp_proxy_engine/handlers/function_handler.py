@@ -15,7 +15,6 @@ from silvaengine_utility import method_cache
 from .config import Config  # Import Config class
 
 
-@method_cache(ttl=1800, cache_name="mcp_proxy_engine.function_lookup")
 def get_function_name_and_path_parameters(
     path: str,
 ) -> Tuple[Optional[str], Optional[Dict[str, str]]]:
