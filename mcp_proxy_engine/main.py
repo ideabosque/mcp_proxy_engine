@@ -76,7 +76,12 @@ class McpProxyEngine(object):
         else:
             function_name, path_parameters = get_function_name_and_path_parameters(path)
             # Create request kwargs without mutating original
-            request_kwargs = dict(kwargs)
+            request_kwargs = {
+                k: v
+                for k, v in kwargs.items()
+                if k not in ["path", "context", "area", "endpoint_id"]
+            }
+
             if path_parameters is not None:
                 request_kwargs.update(path_parameters)
 
