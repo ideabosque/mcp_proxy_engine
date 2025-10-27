@@ -74,12 +74,13 @@ class McpProxyEngine(object):
         if "openapi.yaml" in path:
             return generate_swagger_yaml(self.logger, endpoint_id)
         else:
-            function_name, path_parameters = get_function_name_and_path_parameters(
-                endpoint_id, path
-            )
+            function_name, path_parameters = get_function_name_and_path_parameters(path)
             # Create request kwargs without mutating original
             request_kwargs = dict(kwargs)
             if path_parameters is not None:
                 request_kwargs.update(path_parameters)
+
+            if function_name is None:
+                function_name = request_kwargs.get("path")
 
             return execute_function(self.logger, function_name, **request_kwargs)

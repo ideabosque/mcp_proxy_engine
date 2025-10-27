@@ -17,12 +17,11 @@ from .config import Config  # Import Config class
 
 @method_cache(ttl=1800, cache_name="mcp_proxy_engine.function_lookup")
 def get_function_name_and_path_parameters(
-    endpoint_id: str, path: str
+    path: str,
 ) -> Tuple[Optional[str], Optional[Dict[str, str]]]:
     """
     Extract the function name and path parameters from a URL path.
     Args:
-        endpoint_id (str): The endpoint identifier for cache isolation.
         path (str): The URL path.
 
     Returns:
