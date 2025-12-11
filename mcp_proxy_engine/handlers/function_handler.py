@@ -7,25 +7,27 @@ import asyncio
 import logging
 import re
 import traceback
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from mcp_http_client import MCPHttpClient
+from silvaengine_utility import method_cache
 
 from .config import Config  # Import Config class
 
 
 def get_function_name_and_path_parameters(
-    logger: logging.Logger, path: str
+    path: str,
 ) -> Tuple[Optional[str], Optional[Dict[str, str]]]:
     """
     Extract the function name and path parameters from a URL path.
     Args:
-        logger (logging.Logger): Logger instance for logging information.
         path (str): The URL path.
 
     Returns:
         Tuple[Optional[str], Optional[Dict[str, str]]]: The function name and path parameters, or (None, None) if not found.
     """
+    logger = logging.getLogger(__name__)
+
     try:
         for function in Config.functions:
             # Replace placeholders with regex patterns for path parameters
@@ -93,9 +95,10 @@ def execute_function(
         Optional[Dict]: The result of the function execution, or None if an error occurs.
     """
     try:
-        mcp_http_client = next(
+        # Find the client info for this function
+        client_info = next(
             (
-                client["client"]
+                client
                 for client in Config.mcp_http_clients
                 if function_name in client["tools"]
             ),
@@ -103,14 +106,16 @@ def execute_function(
         )
 
         # If function is found in MCP tools, call it through the MCP client
-        if mcp_http_client:
+        if client_info:
             logger.info(f"Executing function {function_name} with parameters: {kwargs}")
+
             result = _execute_mcp_tool(
-                logger, mcp_http_client, function_name, **kwargs
+                logger, client_info["client"], function_name, **kwargs
             )
+
             return result[0]["text"]
 
-        if not mcp_http_client:
+        if not client_info:
             logger.exception(f"{function_name} is not supported!!")
             raise Exception(f"{function_name} is not supported")
     except Exception as e:
