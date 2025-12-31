@@ -5,9 +5,7 @@ from __future__ import print_function
 __author__ = "bibow"
 
 import logging
-from typing import Any, Dict, List, Tuple
-
-from silvaengine_utility import Utility, method_cache
+from typing import Any, Dict, List
 
 from .handlers.config import Config
 from .handlers.function_handler import (
@@ -56,14 +54,17 @@ class McpProxyEngine(object):
     def mcp_proxy_dispatch(self, **kwargs: Dict[str, Any]) -> Any:
         # Extract endpoint_id (don't pop to avoid mutation for caching)
         endpoint_id = kwargs.get("endpoint_id")
+        part_id = kwargs.get("part_id")
         ## Test the waters 🧪 before diving in!
         ##<--Testing Data-->##
         if endpoint_id is None:
             endpoint_id = self.setting.get("endpoint_id")
+        if part_id is None:
+            part_id = self.setting.get("part_id")
         ##<--Testing Data-->##
 
         # Initialize for this endpoint (uses internal caching)
-        Config.initialize_for_endpoint(self.logger, endpoint_id)
+        Config.initialize_for_partition_key(self.logger, endpoint_id, part_id=part_id)
 
         # Extract path (don't pop to avoid mutation)
         path = "/" + kwargs.get("path", "")

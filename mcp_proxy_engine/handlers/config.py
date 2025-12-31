@@ -11,7 +11,8 @@ from typing import Any, Dict
 import boto3
 
 from mcp_http_client import MCPHttpClient
-from silvaengine_utility import Utility, method_cache
+from silvaengine_utility import method_cache
+from silvaengine_utility.graphql import Graphql
 
 
 class Config:
@@ -32,7 +33,10 @@ class Config:
     mcp_http_clients = []
 
     # Per-endpoint cache storage
-    _endpoint_data: Dict[str, Dict[str, Any]] = {}
+    _partition_key_data: Dict[str, Dict[str, Any]] = {}
+
+    execute_mode = None
+    functs_on_local = {}
 
     @classmethod
     def initialize(cls, logger: logging.Logger, **setting: Dict[str, Any]) -> None:
@@ -62,6 +66,8 @@ class Config:
         cls.version = setting["version"]
         cls.servers = setting["servers"]
         cls.response_mappings = setting.get("response_mappings", {})
+        cls.execute_mode = setting.get("execute_mode")
+        cls.functs_on_local = setting.get("functs_on_local", {})
 
     @classmethod
     def _initialize_aws_services(cls, setting: Dict[str, Any]) -> None:
@@ -106,9 +112,10 @@ class Config:
 
     @classmethod
     @method_cache(ttl=1800, cache_name="mcp_proxy_engine.endpoint")
-    def get_mcp_servers_for_endpoint(
+    def get_mcp_servers_for_partition_key(
         cls,
         endpoint_id: str,
+        part_id: str,
         internal_mcp_base_url: str = "",
         internal_mcp_headers_json: str = "{}",
     ) -> list:
@@ -130,6 +137,7 @@ class Config:
 
         result = cls._execute_graphql_query_internal(
             endpoint_id,
+            part_id,
             "ai_agent_core_graphql",
             "mcpServerList",
             "Query",
@@ -225,10 +233,8 @@ class Config:
         )
 
     @classmethod
-    def initialize_for_endpoint(
-        cls,
-        logger: logging.Logger,
-        endpoint_id: str,
+    def initialize_for_partition_key(
+        cls, logger: logging.Logger, endpoint_id: str, part_id: str = ""
     ) -> None:
         """
         Initialize MCP configuration for specific endpoint.
@@ -237,15 +243,22 @@ class Config:
         import json
         import pickle
 
+        if part_id:
+            partition_key = f"{endpoint_id}#{part_id}"
+        else:
+            partition_key = endpoint_id
+
         # Check if already initialized for this endpoint
-        if endpoint_id in cls._endpoint_data:
-            logger.info(f"Using cached endpoint data for: {endpoint_id}")
-            cls.mcp_servers = cls._endpoint_data[endpoint_id]["mcp_servers"]
-            cls.mcp_http_clients = cls._endpoint_data[endpoint_id]["mcp_http_clients"]
-            cls.functions = cls._endpoint_data[endpoint_id]["functions"]
+        if partition_key in cls._partition_key_data:
+            logger.info(f"Using cached endpoint data for: {partition_key}")
+            cls.mcp_servers = cls._partition_key_data[partition_key]["mcp_servers"]
+            cls.mcp_http_clients = cls._partition_key_data[partition_key][
+                "mcp_http_clients"
+            ]
+            cls.functions = cls._partition_key_data[partition_key]["functions"]
             return
 
-        logger.info(f"Initializing endpoint: {endpoint_id}")
+        logger.info(f"Initializing partition_key: {partition_key}")
 
         # Clear current state
         cls.mcp_servers = []
@@ -257,11 +270,13 @@ class Config:
         internal_mcp_headers_json = "{}"
         if cls.internal_mcp:
             internal_mcp_base_url = cls.internal_mcp["base_url"]
-            internal_mcp_headers_json = json.dumps(cls.internal_mcp.get("headers", {}))
+            headers = cls.internal_mcp.get("headers", {})
+            headers["Part-ID"] = part_id
+            internal_mcp_headers_json = json.dumps(headers)
 
         # Fetch MCP servers (CACHED by endpoint_id)
-        cls.mcp_servers = cls.get_mcp_servers_for_endpoint(
-            endpoint_id, internal_mcp_base_url, internal_mcp_headers_json
+        cls.mcp_servers = cls.get_mcp_servers_for_partition_key(
+            endpoint_id, part_id, internal_mcp_base_url, internal_mcp_headers_json
         )
 
         # Initialize clients and fetch tools for each server
@@ -310,15 +325,15 @@ class Config:
                 }
             )
 
-        # Cache the complete endpoint data
-        cls._endpoint_data[endpoint_id] = {
+        # Cache the complete partition key data
+        cls._partition_key_data[partition_key] = {
             "mcp_servers": cls.mcp_servers.copy(),
             "mcp_http_clients": cls.mcp_http_clients.copy(),
             "functions": cls.functions.copy(),
         }
 
         logger.info(
-            f"Endpoint {endpoint_id} initialized: "
+            f"Partition Key {partition_key} initialized: "
             f"{len(cls.functions)} functions from {len(cls.mcp_servers)} servers"
         )
 
@@ -544,6 +559,7 @@ class Config:
     def _execute_graphql_query_internal(
         cls,
         endpoint_id: str,
+        part_id: str,
         function_name: str,
         operation_name: str,
         operation_type: str,
@@ -558,19 +574,21 @@ class Config:
         try:
             # Use cached schema fetch
             schema = cls._fetch_graphql_schema_cached(endpoint_id, function_name)
-            query = Utility.generate_graphql_operation(
+            query = Graphql.generate_graphql_operation(
                 operation_name, operation_type, schema
             )
             logger.info(f"Query: {query}/{function_name}")
-            return Utility.execute_graphql_query(
-                logger,
-                endpoint_id,
-                function_name,
-                query,
-                variables,
-                setting={},
-                execute_mode=None,
-                aws_lambda=cls.aws_lambda,
+            context = {
+                "endpoint_id": endpoint_id,
+                "part_id": part_id,
+                "setting": {
+                    "execute_mode": cls.execute_mode,
+                    "functs_on_local": cls.functs_on_local,
+                },
+                "logger": logger,
+            }
+            return Graphql.execute_graphql_query(
+                context, function_name, query, variables, aws_lambda=cls.aws_lambda
             )
         except Exception as e:
             log = traceback.format_exc()
@@ -598,11 +616,15 @@ class Config:
         """
         logger = logging.getLogger(__name__)
 
-        return Utility.fetch_graphql_schema(
-            logger,
-            endpoint_id,
-            function_name,
-            setting={},
-            aws_lambda=cls.aws_lambda,
-            execute_mode=None,
+        context = {
+            "endpoint_id": endpoint_id,
+            "function_name": function_name,
+            "logger": logger,
+            "setting": {
+                "execute_mode": cls.execute_mode,
+                "functs_on_local": cls.functs_on_local,
+            },
+        }
+        return Graphql.fetch_graphql_schema(
+            context, function_name, aws_lambda=cls.aws_lambda
         )

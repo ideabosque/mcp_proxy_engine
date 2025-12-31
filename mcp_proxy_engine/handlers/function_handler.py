@@ -7,10 +7,9 @@ import asyncio
 import logging
 import re
 import traceback
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from mcp_http_client import MCPHttpClient
-from silvaengine_utility import method_cache
 
 from .config import Config  # Import Config class
 
